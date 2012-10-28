@@ -45,7 +45,17 @@ class EAPAuth:
 
         print 'Sending EAPOL logoff'
 
-    def send_response_md5(self): pass 
+    def send_response_md5(self): 
+        md5 = self.login_info[1][0:16]
+        if len(md5) < 16:
+            md5 = md5 + '\x00' * (16 - len (md5))
+        chap = []
+        for i in xrange(0, 16):
+            chap.append(chr(ord(md5[i]) ^ ord(md5data[i])))
+        resp = chr(len(chap)) + ''.join(chap) + self.login_info[0]
+        eap_packet = self.ethernet_header + get_EAPOL(EAPOL_EAPPACKET, get_EAP(EAP_RESPONSE, packet_id, EAP_TYPE_MD5, resp))
+        self.client.send(eap_packet)
+            
     def send_response_id(self, packet_id):
         self.client.send(self.ethernet_header + 
                 get_EAPOL(EAPOL_EAPPACKET,
@@ -57,11 +67,7 @@ class EAPAuth:
     def send_response_h3c(self, packet_id):
         resp=chr(len(self.login_info[1]))+self.login_info[1]+self.login_info[0]
         eap_packet = self.ethernet_header + get_EAPOL(EAPOL_EAPPACKET, get_EAP(EAP_RESPONSE, packet_id, EAP_TYPE_H3C, resp))
-        try:
-            self.client.send(eap_packet)
-        except socket.error, msg:
-            print "Connection error!"
-            exit(-1)
+        self.client.send(eap_packet)
 
     def display_login_message(self, msg):
         """
@@ -89,7 +95,8 @@ class EAPAuth:
                 else:
                     print 'Got EAP Failure'
                     self.display_login_message(eap_packet[10:])
-                exit(-1)
+                    raise error
+                #exit(-1)
             elif code == EAP_RESPONSE:
                 print 'Got Unknown EAP Response'
             elif code == EAP_REQUEST:
@@ -103,6 +110,12 @@ class EAPAuth:
                     print 'Got EAP Request for Allocation'
                     self.send_response_h3c(id)
                     print 'Sending EAP response with password'
+                elif reqtype == EAP_TYPE_MD5:
+                    data_len = unpack("!B", reqdata[0:1])[0]
+                    md5data = reqdata[1:1 + data_len]
+                    print 'Got EAP Request for MD5-Challenge'
+                    self.send_response_md5(id, md5data)
+                    print 'Sending EAP response with password'
                 else:
                     print 'Got unknown Request type (%i)' % reqtype
             elif code==10 and id==5:
@@ -113,19 +126,21 @@ class EAPAuth:
             print 'Got unknown EAPOL type %i' % type
 
     def serve_forever(self):
-        try:
-            self.send_start()
-            while 1:
-                try:
+        retry_num = 1;
+        while not self.has_sent_logoff and retry_num <= 5:
+            try:
+                self.send_start()
+                while True:
                     eap_packet = self.client.recv(1600)
-                except error , msg:
-                    print "Connection error!"
-                    exit(-1)
-                # strip the ethernet_header and handle
-                self.EAP_handler(eap_packet[14:])
-        except KeyboardInterrupt:
-            print 'Interrupted by user'
-            self.send_logoff()
+                    self.EAP_handler(eap_packet[14:])
+                    retry_num = 1
+            except error:
+                print "Connection error! retry %d" % retry_num
+                retry_num += 1
+                for i in range(0, 6000000): pass
+            except KeyboardInterrupt:
+                print "Interrupted by user"
+                self.send_logoff()
 
 def daemonize (stdin='/dev/null', stdout='/dev/null', stderr='/dev/null'):
 
